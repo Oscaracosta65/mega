@@ -1603,8 +1603,8 @@ table.skai-table tbody tr:hover{
 
           <div class="skai-advanced-links" aria-label="Advanced tools">
             <a class="skai-mini-link" href="/picking-winning-numbers/artificial-intelligence/skip-and-hit-analysis?game_id=113">Skip &amp; Hit Analysis</a>
-            <a class="skai-mini-link" href="/picking-winning-numbers/artificial-intelligence/markov-chain-monte-carlo-mcmc-analysis?game_id=113">MCMC Markov Analysis</a>
-            <a class="skai-mini-link" href="/all-lottery-heatmaps?gId=<?php echo rawurlencode($gId); ?>&amp;stateName=<?php echo rawurlencode((string) $stateName); ?>&amp;gName=<?php echo rawurlencode((string) $gName); ?>&amp;sTn=<?php echo rawurlencode(strtolower((string) $stateAbrev)); ?>">Heatmap Analysis</a>
+            <a class="skai-mini-link" href="/picking-winning-numbers/artificial-intelligence/markov-chain-monte-carlo-mcmc-analysis?gameId=113">MCMC Markov Analysis</a>
+            <a class="skai-mini-link" href="/all-lottery-heatmaps?gameId=113">Heatmap Analysis</a>
           </div>
         </div>
 
@@ -2076,10 +2076,10 @@ table.skai-table tbody tr:hover{
       </div>
 
       <div class="skai-utility-grid">
-        <a class="skai-utility-link" href="/picking-winning-numbers/artificial-intelligence/markov-chain-monte-carlo-mcmc-analysis?game_id=113">MCMC Markov Analysis</a>
-        <a class="skai-utility-link" href="/all-lottery-heatmaps?gId=<?php echo rawurlencode($gId); ?>&amp;stateName=<?php echo rawurlencode((string) $stateName); ?>&amp;gName=<?php echo rawurlencode((string) $gName); ?>&amp;sTn=<?php echo rawurlencode(strtolower((string) $stateAbrev)); ?>">Heatmap Analysis</a>
-        <a class="skai-utility-link" href="/lottery-archives?gId=<?php echo rawurlencode($gId); ?>&amp;stateName=<?php echo rawurlencode((string) $stateName); ?>&amp;gName=<?php echo rawurlencode((string) $gName); ?>&amp;sTn=<?php echo rawurlencode(strtolower((string) $stateAbrev)); ?>">Lottery Archives</a>
-        <a class="skai-utility-link" href="/lowest-drawn-number-analysis?gId=<?php echo rawurlencode($gId); ?>&amp;stateName=<?php echo rawurlencode((string) $stateName); ?>&amp;gName=<?php echo rawurlencode((string) $gName); ?>&amp;sTn=<?php echo rawurlencode(strtolower((string) $stateAbrev)); ?>">Lowest Number Analysis</a>
+        <a class="skai-utility-link" href="/picking-winning-numbers/artificial-intelligence/markov-chain-monte-carlo-mcmc-analysis?gameId=113">MCMC Markov Analysis</a>
+        <a class="skai-utility-link" href="/all-lottery-heatmaps?gameId=113">Heatmap Analysis</a>
+        <a class="skai-utility-link" href="/lottery-archives?gId=113&amp;gName=megamillions&amp;sTn=ar">Mega Millions Archives</a>
+        <a class="skai-utility-link" href="/lowest-drawn-number-analysis?gId=113&amp;stateName=<?php echo rawurlencode((string) $stateName); ?>&amp;gName=<?php echo rawurlencode((string) $gName); ?>&amp;sTn=<?php echo rawurlencode((string) $stateAbrev); ?>">Lowest Number Analysis</a>
       </div>
     </div>
   </section>
