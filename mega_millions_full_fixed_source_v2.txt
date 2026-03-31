@@ -1,0 +1,1066 @@
+{source 0}
+<?php
+defined('_JEXEC') or die;
+
+use Joomla\CMS\Factory;
+use Joomla\CMS\Session\Session;
+
+$app   = Factory::getApplication();
+$input = $app->input;
+$db    = Factory::getDbo();
+$doc   = Factory::getDocument();
+
+/**
+ * =====================================================
+ * PAGE / URL VARIABLES
+ * =====================================================
+ */
+$stateNameDefault = 'Arkansas';
+$stateName        = $input->getString('stn', $stateNameDefault);
+$stateAbrev       = $input->getString('sta', 'ar');
+$stateAbrev       = preg_replace('/[^a-z]/i', '', strtolower((string) $stateAbrev));
+if ($stateAbrev === '') {
+    $stateAbrev = 'ar';
+}
+
+$gName    = 'Mega Millions';
+$dbCol    = '#__lotterydb_ar';
+$gameId   = '113';
+$stLink   = $stateName;
+$logoPath = '/images/lottodb/us/' . $stateAbrev . '/mega-millions.png';
+
+$pageTitle = $stateName . ' Mega Millions Results Analysis | LottoExpert.net';
+$doc->setTitle($pageTitle);
+
+/**
+ * =====================================================
+ * HELPERS
+ * =====================================================
+ */
+if (!function_exists('le_format_date_long')) {
+    function le_format_date_long($date)
+    {
+        if (empty($date)) {
+            return '—';
+        }
+
+        $ts = strtotime((string) $date);
+        if ($ts === false) {
+            return '—';
+        }
+
+        return date('F j, Y', $ts);
+    }
+}
+
+if (!function_exists('le_format_date_short')) {
+    function le_format_date_short($date)
+    {
+        if (empty($date)) {
+            return '—';
+        }
+
+        $ts = strtotime((string) $date);
+        if ($ts === false) {
+            return '—';
+        }
+
+        return date('m-d-Y', $ts);
+    }
+}
+
+if (!function_exists('le_pad_ball')) {
+    function le_pad_ball($value)
+    {
+        $value = trim((string) $value);
+        if ($value === '') {
+            return '';
+        }
+
+        if (ctype_digit($value) && (int) $value < 10) {
+            return str_pad($value, 2, '0', STR_PAD_LEFT);
+        }
+
+        return $value;
+    }
+}
+
+if (!function_exists('le_escape')) {
+    function le_escape($value)
+    {
+        return htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8');
+    }
+}
+
+if (!function_exists('le_sort_assoc_desc')) {
+    function le_sort_assoc_desc($array)
+    {
+        arsort($array, SORT_NUMERIC);
+        return $array;
+    }
+}
+
+if (!function_exists('le_sort_quiet_numbers')) {
+    function le_sort_quiet_numbers($lastSeenMap, $window)
+    {
+        $scored = array();
+        foreach ($lastSeenMap as $num => $idx) {
+            if ($idx === null) {
+                $scored[$num] = $window + 1;
+            } else {
+                $scored[$num] = (int) $idx + 1;
+            }
+        }
+        arsort($scored, SORT_NUMERIC);
+        return $scored;
+    }
+}
+
+if (!function_exists('le_get_rows')) {
+    function le_get_rows($db, $dbCol, $gameId, $limit)
+    {
+        $query = $db->getQuery(true)
+            ->select('*')
+            ->from($db->quoteName($dbCol))
+            ->where($db->quoteName('game_id') . ' = ' . $db->quote($gameId))
+            ->order($db->quoteName('draw_date') . ' DESC');
+
+        $db->setQuery($query, 0, (int) $limit);
+        $rows = $db->loadAssocList();
+
+        if (!is_array($rows)) {
+            return array();
+        }
+
+        return $rows;
+    }
+}
+
+if (!function_exists('le_previous_hit_date')) {
+    function le_previous_hit_date($db, $dbCol, $gameId, $drawDate, $ball, $isBonus)
+    {
+        if ($ball === '') {
+            return null;
+        }
+
+        $query = $db->getQuery(true)
+            ->select('MAX(' . $db->quoteName('draw_date') . ')')
+            ->from($db->quoteName($dbCol))
+            ->where($db->quoteName('game_id') . ' = ' . $db->quote($gameId))
+            ->where($db->quoteName('draw_date') . ' < ' . $db->quote($drawDate));
+
+        if ($isBonus) {
+            $query->where($db->quoteName('sixth') . ' = ' . $db->quote($ball));
+        } else {
+            $query->where('(' .
+                $db->quoteName('first') . ' = ' . $db->quote($ball) . ' OR ' .
+                $db->quoteName('second') . ' = ' . $db->quote($ball) . ' OR ' .
+                $db->quoteName('third') . ' = ' . $db->quote($ball) . ' OR ' .
+                $db->quoteName('fourth') . ' = ' . $db->quote($ball) . ' OR ' .
+                $db->quoteName('fifth') . ' = ' . $db->quote($ball) .
+            ')');
+        }
+
+        $db->setQuery($query);
+        $result = $db->loadResult();
+
+        return $result ? (string) $result : null;
+    }
+}
+
+if (!function_exists('le_drawings_ago')) {
+    function le_drawings_ago($db, $dbCol, $gameId, $prevDate, $currentDate)
+    {
+        if (empty($prevDate) || empty($currentDate)) {
+            return null;
+        }
+
+        $query = $db->getQuery(true)
+            ->select('COUNT(' . $db->quoteName('id') . ')')
+            ->from($db->quoteName($dbCol))
+            ->where($db->quoteName('game_id') . ' = ' . $db->quote($gameId))
+            ->where($db->quoteName('draw_date') . ' > ' . $db->quote($prevDate))
+            ->where($db->quoteName('draw_date') . ' < ' . $db->quote($currentDate));
+
+        $db->setQuery($query);
+        $count = (int) $db->loadResult();
+
+        return $count + 1;
+    }
+}
+
+/**
+ * =====================================================
+ * INPUT WINDOWS
+ * =====================================================
+ */
+$defaultMainWindow = 100;
+$defaultBonusWindow = 100;
+
+$mainWindow = $defaultMainWindow;
+$bonusWindow = $defaultBonusWindow;
+
+if ($input->getMethod() === 'POST' && Session::checkToken()) {
+    $mainWindow  = $input->post->getInt('nod', $defaultMainWindow);
+    $bonusWindow = $input->post->getInt('pnod', $defaultBonusWindow);
+}
+
+if ($mainWindow < 10) {
+    $mainWindow = 10;
+}
+if ($mainWindow > 700) {
+    $mainWindow = 700;
+}
+if ($bonusWindow < 10) {
+    $bonusWindow = 10;
+}
+if ($bonusWindow > 700) {
+    $bonusWindow = 700;
+}
+
+/**
+ * =====================================================
+ * DATA FETCH
+ * =====================================================
+ */
+$latestRows = le_get_rows($db, $dbCol, $gameId, 1);
+$latest     = !empty($latestRows) ? $latestRows[0] : null;
+
+$drawDate      = $latest ? (string) $latest['draw_date'] : '';
+$nextDrawDate  = $latest ? (string) $latest['next_draw_date'] : '';
+$nextJackpot   = $latest ? (string) $latest['next_jackpot'] : '';
+$p1            = $latest ? trim((string) $latest['first']) : '';
+$p2            = $latest ? trim((string) $latest['second']) : '';
+$p3            = $latest ? trim((string) $latest['third']) : '';
+$p4            = $latest ? trim((string) $latest['fourth']) : '';
+$p5            = $latest ? trim((string) $latest['fifth']) : '';
+$pb            = $latest ? trim((string) $latest['sixth']) : '';
+
+$latestMainBalls = array($p1, $p2, $p3, $p4, $p5);
+
+$mainRows  = le_get_rows($db, $dbCol, $gameId, $mainWindow);
+$bonusRows = le_get_rows($db, $dbCol, $gameId, $bonusWindow);
+
+$mainCounts = array();
+$mainLastSeen = array();
+for ($i = 1; $i <= 70; $i++) {
+    $key = str_pad((string) $i, 2, '0', STR_PAD_LEFT);
+    $mainCounts[$key] = 0;
+    $mainLastSeen[$key] = null;
+}
+
+$bonusCounts = array();
+$bonusLastSeen = array();
+for ($i = 1; $i <= 25; $i++) {
+    $key = str_pad((string) $i, 2, '0', STR_PAD_LEFT);
+    $bonusCounts[$key] = 0;
+    $bonusLastSeen[$key] = null;
+}
+
+foreach ($mainRows as $idx => $row) {
+    $balls = array(
+        trim((string) $row['first']),
+        trim((string) $row['second']),
+        trim((string) $row['third']),
+        trim((string) $row['fourth']),
+        trim((string) $row['fifth'])
+    );
+
+    foreach ($balls as $ball) {
+        if ($ball !== '' && isset($mainCounts[$ball])) {
+            $mainCounts[$ball]++;
+            if ($mainLastSeen[$ball] === null) {
+                $mainLastSeen[$ball] = (int) $idx;
+            }
+        }
+    }
+}
+
+foreach ($bonusRows as $idx => $row) {
+    $ball = trim((string) $row['sixth']);
+    if ($ball !== '' && isset($bonusCounts[$ball])) {
+        $bonusCounts[$ball]++;
+        if ($bonusLastSeen[$ball] === null) {
+            $bonusLastSeen[$ball] = (int) $idx;
+        }
+    }
+}
+
+$activeMainSorted = le_sort_assoc_desc($mainCounts);
+$topActiveMain = array_slice(array_keys($activeMainSorted), 0, 10);
+
+$quietMainSorted = le_sort_quiet_numbers($mainLastSeen, $mainWindow);
+$topQuietMain = array_slice(array_keys($quietMainSorted), 0, 10);
+
+$activeBonusSorted = le_sort_assoc_desc($bonusCounts);
+$topActiveBonus = array_slice(array_keys($activeBonusSorted), 0, 5);
+
+$repeatRecent = array();
+if (count($mainRows) > 1) {
+    $recentCompare = array_slice($mainRows, 1, 10);
+    foreach ($recentCompare as $row) {
+        $prevBalls = array(
+            trim((string) $row['first']),
+            trim((string) $row['second']),
+            trim((string) $row['third']),
+            trim((string) $row['fourth']),
+            trim((string) $row['fifth'])
+        );
+        foreach ($latestMainBalls as $ball) {
+            if ($ball !== '' && in_array($ball, $prevBalls, true) && !in_array($ball, $repeatRecent, true)) {
+                $repeatRecent[] = $ball;
+            }
+        }
+    }
+    sort($repeatRecent, SORT_NATURAL);
+}
+
+$drawHistoryRows = array();
+if ($drawDate !== '') {
+    foreach ($latestMainBalls as $ball) {
+        $prevDate = le_previous_hit_date($db, $dbCol, $gameId, $drawDate, $ball, false);
+        $ago      = le_drawings_ago($db, $dbCol, $gameId, $prevDate, $drawDate);
+        $drawHistoryRows[] = array(
+            'label'    => le_pad_ball($ball),
+            'prevDate' => $prevDate,
+            'ago'      => $ago
+        );
+    }
+
+    $prevPbDate = le_previous_hit_date($db, $dbCol, $gameId, $drawDate, $pb, true);
+    $agoPb      = le_drawings_ago($db, $dbCol, $gameId, $prevPbDate, $drawDate);
+    $drawHistoryRows[] = array(
+        'label'    => 'Mega Ball ' . le_pad_ball($pb),
+        'prevDate' => $prevPbDate,
+        'ago'      => $agoPb
+    );
+}
+?>
+
+[[style type="text/css"]]
+.le-page{max-width:1180px;margin:0 auto;padding:18px 12px 32px;font-family:Arial,Helvetica,sans-serif;color:#0a1a33}
+.le-page *{box-sizing:border-box}
+.le-hero{background:linear-gradient(135deg,#0a1a33 0%,#1c66ff 100%);border-radius:22px;padding:22px;color:#fff;box-shadow:0 18px 38px rgba(10,26,51,.18);margin-bottom:18px}
+.le-hero-grid{display:grid;grid-template-columns:110px 1fr 300px;gap:18px;align-items:start}
+.le-logo-wrap{width:110px;height:110px;border-radius:18px;background:rgba(255,255,255,.96);display:flex;align-items:center;justify-content:center;padding:12px;overflow:hidden}
+.le-logo-wrap img{max-width:100%;max-height:100%;display:block}
+.le-kicker{font-size:12px;letter-spacing:.16em;text-transform:uppercase;font-weight:700;opacity:.82;margin-bottom:8px}
+.le-title{font-size:32px;line-height:1.08;font-weight:800;margin:0 0 10px}
+.le-summary{font-size:15px;line-height:1.7;max-width:760px;color:rgba(255,255,255,.92);margin:0 0 14px}
+.le-ball-row{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:14px 0 16px}
+.le-ball{width:44px;height:44px;border-radius:999px;display:inline-flex;align-items:center;justify-content:center;font-weight:800;font-size:16px}
+.le-ball-main{background:linear-gradient(180deg,#ffffff 0%,#f0f4ff 100%);color:#0a1a33;border:1px solid rgba(10,26,51,.12)}
+.le-ball-bonus{background:radial-gradient(circle at 50% 18%,#f97f92,#a3071e 75%,#333 100%);color:#fff;border:1px solid rgba(255,255,255,.14)}
+.le-action-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:12px}
+.le-btn{display:inline-flex;align-items:center;justify-content:center;min-height:46px;padding:12px 14px;border-radius:14px;font-weight:700;text-decoration:none;text-align:center;transition:all .2s ease}
+.le-btn-primary{background:#fff;color:#0a1a33}
+.le-btn-secondary{background:rgba(255,255,255,.12);color:#fff;border:1px solid rgba(255,255,255,.14)}
+.le-btn:hover{transform:translateY(-1px)}
+.le-panel{background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.16);border-radius:18px;padding:14px}
+.le-panel-label{font-size:11px;text-transform:uppercase;letter-spacing:.12em;font-weight:700;opacity:.78;margin-bottom:10px}
+.le-meta-box{background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.1);border-radius:14px;padding:10px;margin-bottom:10px}
+.le-meta-label{display:block;font-size:11px;text-transform:uppercase;letter-spacing:.08em;font-weight:700;opacity:.74}
+.le-meta-value{display:block;font-size:15px;font-weight:800;margin-top:5px}
+.le-stat-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;margin-bottom:18px}
+.le-stat{background:#fff;border:1px solid rgba(10,26,51,.1);border-radius:18px;overflow:hidden;box-shadow:0 12px 26px rgba(10,26,51,.07)}
+.le-stat-head{padding:12px 14px;color:#fff;font-size:12px;text-transform:uppercase;letter-spacing:.1em;font-weight:700}
+.le-grad-1{background:linear-gradient(135deg,#0a1a33 0%,#1c66ff 100%)}
+.le-grad-2{background:linear-gradient(135deg,#1c66ff 0%,#7f8daa 100%)}
+.le-grad-3{background:linear-gradient(135deg,#20c997 0%,#0a1a33 100%)}
+.le-grad-4{background:linear-gradient(135deg,#f5a623 0%,#0a1a33 100%)}
+.le-stat-body{padding:14px}
+.le-stat-value{font-size:24px;line-height:1.15;font-weight:800;color:#0a1a33;margin-bottom:8px}
+.le-stat-note{font-size:13px;line-height:1.65;color:#5f6f8c}
+.le-tabs{display:flex;flex-wrap:wrap;gap:10px;background:#efeff5;border:1px solid rgba(10,26,51,.08);padding:6px;border-radius:999px;margin-bottom:16px}
+.le-tab{display:inline-flex;align-items:center;justify-content:center;min-height:42px;padding:10px 16px;border-radius:999px;text-decoration:none;color:#0a1a33;font-weight:700;font-size:13px}
+.le-tab-active{background:linear-gradient(135deg,#0a1a33 0%,#1c66ff 100%);color:#fff}
+.le-section{background:#fff;border:1px solid rgba(10,26,51,.1);border-radius:20px;box-shadow:0 10px 24px rgba(10,26,51,.06);overflow:hidden;margin-bottom:16px}
+.le-section-head{padding:18px;border-bottom:1px solid rgba(10,26,51,.08);background:linear-gradient(180deg,#fafcff 0%,#fff 100%)}
+.le-section-title{margin:0;font-size:24px;line-height:1.15;font-weight:800;color:#0a1a33}
+.le-section-sub{margin:8px 0 0;font-size:14px;line-height:1.7;color:#5f6f8c;max-width:840px}
+.le-section-body{padding:18px}
+.le-two-col{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.le-card{border:1px solid rgba(10,26,51,.1);border-radius:18px;overflow:hidden;background:#fff;box-shadow:0 10px 24px rgba(10,26,51,.05)}
+.le-card-head{padding:14px 16px;color:#fff;font-size:16px;font-weight:700}
+.le-card-sub{display:block;margin-top:4px;font-size:12px;line-height:1.45;opacity:.92}
+.le-card-body{padding:14px 16px 16px}
+.le-list{display:grid;gap:10px}
+.le-list-item{display:grid;grid-template-columns:180px 1fr auto;gap:12px;align-items:center;padding:12px 14px;border:1px solid rgba(10,26,51,.08);border-radius:14px;background:linear-gradient(180deg,#fff 0%,#fafbff 100%)}
+.le-list-name{font-weight:700;color:#0a1a33;font-size:14px}
+.le-list-text{font-size:13px;line-height:1.55;color:#5f6f8c}
+.le-badge{display:inline-flex;align-items:center;justify-content:center;min-width:110px;min-height:36px;padding:8px 12px;border-radius:999px;background:linear-gradient(135deg,#1c66ff 0%,#7f8daa 100%);color:#fff;font-size:12px;font-weight:700}
+.le-note{margin-top:14px;padding:14px 16px;border-radius:16px;background:linear-gradient(180deg,#f8fafe 0%,#fff 100%);border:1px solid rgba(10,26,51,.08);font-size:13px;line-height:1.75;color:#5f6f8c}
+.le-controls{padding:14px 16px;border-bottom:1px solid rgba(10,26,51,.08);background:linear-gradient(180deg,#fafcff 0%,#fff 100%)}
+.le-controls form{margin:0}
+.le-controls-row{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px}
+.le-controls-left,.le-controls-right{display:flex;flex-wrap:wrap;align-items:center;gap:10px}
+.le-controls label{font-size:13px;font-weight:700;color:#0a1a33}
+.le-select{min-width:122px;min-height:44px;padding:10px 12px;border-radius:12px;border:1px solid rgba(10,26,51,.16);background:#fff;font-size:14px;font-weight:700;color:#0a1a33}
+.le-button{min-height:44px;padding:10px 16px;border:none;border-radius:12px;background:linear-gradient(135deg,#0a1a33 0%,#1c66ff 100%);color:#fff;font-size:13px;font-weight:700;cursor:pointer}
+.le-filter-group{display:flex;flex-wrap:wrap;gap:8px}
+.le-filter{display:inline-flex;align-items:center;justify-content:center;min-height:36px;padding:8px 12px;border-radius:999px;border:1px solid rgba(10,26,51,.1);background:#fff;color:#0a1a33;font-size:12px;font-weight:700;cursor:pointer}
+.le-filter.is-active{background:linear-gradient(135deg,#0a1a33 0%,#1c66ff 100%);border-color:transparent;color:#fff}
+.le-table-wrap{padding:16px;overflow-x:auto}
+table.le-table{width:100%;min-width:320px;border-collapse:separate;border-spacing:0;background:#fff;border:1px solid rgba(10,26,51,.1);border-radius:16px;overflow:hidden}
+table.le-table thead th{background:linear-gradient(135deg,#0a1a33 0%,#1c66ff 100%);color:#fff;padding:8px 6px;font-size:11px;line-height:1.2;letter-spacing:.04em;text-transform:uppercase;font-weight:700;text-align:center;border-bottom:1px solid rgba(255,255,255,.12)}
+table.le-table tbody td{padding:9px 7px;text-align:center;border-bottom:1px solid rgba(10,26,51,.06);font-size:14px;line-height:1.45;color:#0a1a33;vertical-align:middle}
+table.le-table tbody tr:hover{background:rgba(28,102,255,.04)}
+.le-pill{width:34px;height:34px;border-radius:999px;display:inline-flex;align-items:center;justify-content:center;font-size:14px;line-height:1;font-weight:800}
+.le-pill-main{background:linear-gradient(180deg,#fff 0%,#f3f6ff 100%);color:#0a1a33;border:1px solid rgba(10,26,51,.14)}
+.le-pill-bonus{background:radial-gradient(circle at 50% 18%,#f97f92,#a3071e 75%,#333 100%);color:#fff;border:1px solid rgba(255,255,255,.16)}
+.le-checkbox{transform:scale(1.2);cursor:pointer}
+.le-tracked{margin-top:14px;border:1px solid rgba(10,26,51,.1);border-radius:16px;background:linear-gradient(180deg,#fafcff 0%,#fff 100%);overflow:hidden}
+.le-tracked-head{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:12px 14px;border-bottom:1px solid rgba(10,26,51,.08)}
+.le-tracked-title{margin:0;font-size:15px;font-weight:700;color:#0a1a33}
+.le-link-btn{border:none;background:none;color:#1c66ff;font-size:12px;font-weight:700;cursor:pointer;padding:0}
+.le-chip-wrap{padding:12px 14px 14px;display:flex;flex-wrap:wrap;gap:8px;min-height:64px;align-items:flex-start}
+.le-empty{font-size:13px;line-height:1.6;color:#5f6f8c}
+.le-chip{display:inline-flex;align-items:center;justify-content:center;min-height:36px;padding:8px 12px;border-radius:999px;font-size:13px;font-weight:700}
+.le-chip-main{background:linear-gradient(180deg,#fff 0%,#f3f6ff 100%);border:1px solid rgba(10,26,51,.14);color:#0a1a33}
+.le-chip-bonus{background:radial-gradient(circle at 50% 18%,#f97f92,#a3071e 75%,#333 100%);color:#fff;border:1px solid rgba(255,255,255,.16)}
+.le-tool-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.le-tool{border-radius:18px;overflow:hidden;border:1px solid rgba(10,26,51,.1);background:#fff;box-shadow:0 10px 24px rgba(10,26,51,.05)}
+.le-tool-body{padding:15px 16px 16px}
+.le-tool-copy{margin:0 0 14px;font-size:14px;line-height:1.7;color:#5f6f8c}
+.le-tool-cta{display:inline-flex;align-items:center;justify-content:center;min-height:44px;padding:10px 16px;border-radius:12px;font-size:13px;font-weight:700;background:linear-gradient(135deg,#0a1a33 0%,#1c66ff 100%);color:#fff;text-decoration:none}
+.le-utility-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-top:12px}
+.le-utility-link{min-height:42px;display:flex;align-items:center;justify-content:center;text-align:center;padding:10px 12px;border-radius:12px;border:1px solid rgba(10,26,51,.1);background:linear-gradient(180deg,#fafcff 0%,#fff 100%);color:#0a1a33;text-decoration:none;font-size:13px;font-weight:700}
+.le-quick-controls{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin-bottom:14px}
+.le-radio-group{display:flex;flex-wrap:wrap;gap:12px}
+.le-radio-group label{font-size:14px;color:#0a1a33;font-weight:700}
+.le-loader{display:inline-block;margin-left:8px;font-size:12px;font-weight:700}
+@media(max-width:1080px){.le-hero-grid{grid-template-columns:96px 1fr}.le-panel{grid-column:1 / -1}.le-stat-grid,.le-two-col,.le-tool-grid{grid-template-columns:1fr}.le-action-grid{grid-template-columns:1fr}.le-utility-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:780px){.le-page{padding:12px 8px 24px}.le-title{font-size:26px}.le-tabs{border-radius:18px}.le-list-item{grid-template-columns:1fr}.le-stat-grid{grid-template-columns:1fr}.le-utility-grid{grid-template-columns:1fr 1fr}}
+@media(max-width:560px){.le-utility-grid{grid-template-columns:1fr}.le-controls-row,.le-controls-left,.le-controls-right,.le-quick-controls{display:block}.le-controls-left > *, .le-controls-right > *{display:block;margin:0 0 10px 0}}
+[[/style]]
+
+<div class="le-page">
+
+  <section class="le-hero">
+    <div class="le-hero-grid">
+      <div class="le-logo-wrap">
+        <img src="<?php echo le_escape($logoPath); ?>" alt="<?php echo le_escape($stateName . ' ' . $gName); ?>">
+      </div>
+
+      <div>
+        <div class="le-kicker">Verified Results • Frequency • Recency • LottoExpert Context</div>
+        <h1 class="le-title"><?php echo le_escape($stateName . ' ' . $gName . ' Results & Analysis'); ?></h1>
+        <p class="le-summary">
+          Review the latest verified Mega Millions draw, see which numbers have been most active, identify quieter stretches,
+          and move into deeper analysis tools from a cleaner, more structured view.
+        </p>
+
+        <div class="le-ball-row" aria-label="Latest draw numbers">
+          <span class="le-ball le-ball-main"><?php echo le_escape(le_pad_ball($p1)); ?></span>
+          <span class="le-ball le-ball-main"><?php echo le_escape(le_pad_ball($p2)); ?></span>
+          <span class="le-ball le-ball-main"><?php echo le_escape(le_pad_ball($p3)); ?></span>
+          <span class="le-ball le-ball-main"><?php echo le_escape(le_pad_ball($p4)); ?></span>
+          <span class="le-ball le-ball-main"><?php echo le_escape(le_pad_ball($p5)); ?></span>
+          <span class="le-ball le-ball-bonus"><?php echo le_escape(le_pad_ball($pb)); ?></span>
+        </div>
+
+        <div class="le-action-grid">
+          <a class="le-btn le-btn-primary" href="/picking-winning-numbers/artificial-intelligence/skai-lottery-prediction?gameId=113">Open SKAI Analysis</a>
+          <a class="le-btn le-btn-secondary" href="#tables">View Frequency Tables</a>
+          <a class="le-btn le-btn-secondary" href="#quick-picks">Generate Quick Picks</a>
+        </div>
+      </div>
+
+      <aside class="le-panel">
+        <div class="le-panel-label">Latest draw summary</div>
+
+        <div class="le-meta-box">
+          <span class="le-meta-label">State from URL</span>
+          <span class="le-meta-value"><?php echo le_escape($stateName); ?></span>
+        </div>
+
+        <div class="le-meta-box">
+          <span class="le-meta-label">Draw date</span>
+          <span class="le-meta-value"><?php echo le_escape(le_format_date_long($drawDate)); ?></span>
+        </div>
+
+        <div class="le-meta-box">
+          <span class="le-meta-label">Next drawing date</span>
+          <span class="le-meta-value"><?php echo le_escape(le_format_date_long($nextDrawDate)); ?></span>
+        </div>
+
+        <?php if ($nextJackpot !== '' && $nextJackpot !== '0' && strtolower($nextJackpot) !== 'n/a') { ?>
+        <div class="le-meta-box">
+          <span class="le-meta-label">Next jackpot</span>
+          <span class="le-meta-value">$<?php echo le_escape(number_format((float) $nextJackpot, 0, '.', ',')); ?></span>
+        </div>
+        <?php } ?>
+      </aside>
+    </div>
+  </section>
+
+  <section class="le-stat-grid">
+    <article class="le-stat">
+      <div class="le-stat-head le-grad-1">Most active main numbers</div>
+      <div class="le-stat-body">
+        <div class="le-stat-value"><?php echo le_escape(implode(', ', array_slice($topActiveMain, 0, 3))); ?></div>
+        <div class="le-stat-note">Highest frequency counts in the current <?php echo (int) $mainWindow; ?>-draw main-number window.</div>
+      </div>
+    </article>
+
+    <article class="le-stat">
+      <div class="le-stat-head le-grad-2">Quietest now</div>
+      <div class="le-stat-body">
+        <div class="le-stat-value"><?php echo le_escape(implode(', ', array_slice($topQuietMain, 0, 3))); ?></div>
+        <div class="le-stat-note">Numbers sitting furthest from their most recent appearance inside the selected window.</div>
+      </div>
+    </article>
+
+    <article class="le-stat">
+      <div class="le-stat-head le-grad-3">Repeated recently</div>
+      <div class="le-stat-body">
+        <div class="le-stat-value"><?php echo !empty($repeatRecent) ? le_escape(implode(', ', $repeatRecent)) : 'None'; ?></div>
+        <div class="le-stat-note">Latest main numbers that also appeared in the recent trailing draws.</div>
+      </div>
+    </article>
+
+    <article class="le-stat">
+      <div class="le-stat-head le-grad-4">Loaded windows</div>
+      <div class="le-stat-body">
+        <div class="le-stat-value"><?php echo (int) $mainWindow; ?> / <?php echo (int) $bonusWindow; ?></div>
+        <div class="le-stat-note">Main-number and Mega Ball windows currently loaded on this page.</div>
+      </div>
+    </article>
+  </section>
+
+  <nav class="le-tabs" aria-label="Page navigation">
+    <a class="le-tab le-tab-active" href="#overview">Overview</a>
+    <a class="le-tab" href="#history">Draw Context</a>
+    <a class="le-tab" href="#tables">Tables</a>
+    <a class="le-tab" href="#tools">Advanced Tools</a>
+    <a class="le-tab" href="#quick-picks">Quick Picks</a>
+  </nav>
+
+  <section id="overview" class="le-section">
+    <div class="le-section-head">
+      <h2 class="le-section-title">Overview</h2>
+      <p class="le-section-sub">
+        This page gives a cleaner way to read Mega Millions history. Start with the current draw, then review which numbers are active,
+        which are quieter, and how the latest result fits into recent draw behavior.
+      </p>
+    </div>
+    <div class="le-section-body">
+      <div class="le-two-col">
+        <div class="le-card">
+          <div class="le-card-head le-grad-1">Main number activity<span class="le-card-sub">Top 10 main numbers by frequency in the last <?php echo (int) $mainWindow; ?> drawings</span></div>
+          <div class="le-card-body">
+            <div class="le-note" style="margin-top:0;">
+              <strong>Most active:</strong> <?php echo le_escape(implode(', ', $topActiveMain)); ?><br>
+              These are the main numbers showing the highest appearance counts within the current selected window.
+            </div>
+          </div>
+        </div>
+
+        <div class="le-card">
+          <div class="le-card-head le-grad-4">Quiet stretches<span class="le-card-sub">Top 10 main numbers furthest from their last appearance</span></div>
+          <div class="le-card-body">
+            <div class="le-note" style="margin-top:0;">
+              <strong>Quietest:</strong> <?php echo le_escape(implode(', ', $topQuietMain)); ?><br>
+              Quiet numbers are not guarantees. They simply help show which values have been absent for longer inside the selected range.
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="history" class="le-section">
+    <div class="le-section-head">
+      <h2 class="le-section-title">Current draw context</h2>
+      <p class="le-section-sub">
+        This section shows when each number from the latest draw was last seen and how many drawings ago it appeared. That helps you understand
+        whether the current result included quick repeats or longer-gap returns.
+      </p>
+    </div>
+    <div class="le-section-body">
+      <div class="le-card">
+        <div class="le-card-head le-grad-2">Latest draw history<span class="le-card-sub">Previous appearance date and draw spacing for each latest value</span></div>
+        <div class="le-card-body">
+          <div class="le-list">
+            <?php foreach ($drawHistoryRows as $item) { ?>
+            <div class="le-list-item">
+              <div class="le-list-name"><?php echo le_escape($item['label']); ?></div>
+              <div class="le-list-text">
+                <?php if (!empty($item['prevDate'])) { ?>
+                  Previously seen on <?php echo le_escape(le_format_date_long($item['prevDate'])); ?>
+                <?php } else { ?>
+                  No prior appearance found in the available loaded history.
+                <?php } ?>
+              </div>
+              <div class="le-badge"><?php echo $item['ago'] !== null ? (int) $item['ago'] . ' drws ago' : '—'; ?></div>
+            </div>
+            <?php } ?>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="tables" class="le-section">
+    <div class="le-section-head">
+      <h2 class="le-section-title">Frequency tables and tracked numbers</h2>
+      <p class="le-section-sub">
+        Frequency shows how often numbers were drawn inside a selected window. Recency shows how long it has been since the last appearance.
+        Use these tables to review exact values, then track a smaller working set for comparison.
+      </p>
+    </div>
+
+    <div class="le-controls">
+      <form method="post" action="">
+        <div class="le-controls-row">
+          <div class="le-controls-left">
+            <label for="nod">Main-number draw window</label>
+            <select class="le-select" name="nod" id="nod">
+              <?php for ($n = 10; $n <= 700; $n += 5) { ?>
+              <option value="<?php echo (int) $n; ?>"<?php echo $n === (int) $mainWindow ? ' selected="selected"' : ''; ?>><?php echo (int) $n; ?></option>
+              <?php } ?>
+            </select>
+
+            <label for="pnod">Mega Ball draw window</label>
+            <select class="le-select" name="pnod" id="pnod">
+              <?php for ($n = 10; $n <= 700; $n += 5) { ?>
+              <option value="<?php echo (int) $n; ?>"<?php echo $n === (int) $bonusWindow ? ' selected="selected"' : ''; ?>><?php echo (int) $n; ?></option>
+              <?php } ?>
+            </select>
+          </div>
+
+          <div class="le-controls-right">
+            <button class="le-button" type="submit">Update analysis windows</button>
+          </div>
+        </div>
+        <?php echo Joomla\CMS\HTML\HTMLHelper::_('form.token'); ?>
+      </form>
+    </div>
+
+    <div class="le-section-body">
+      <div class="le-two-col">
+        <div class="le-card">
+          <div class="le-card-head le-grad-1">Main numbers table<span class="le-card-sub">Values 01–70 across the last <?php echo (int) $mainWindow; ?> drawings</span></div>
+
+          <div class="le-controls">
+            <div class="le-filter-group" data-filter-group="main">
+              <button class="le-filter is-active" type="button" data-filter="all">All</button>
+              <button class="le-filter" type="button" data-filter="active">Most active</button>
+              <button class="le-filter" type="button" data-filter="quiet">Quietest</button>
+              <button class="le-filter" type="button" data-filter="recent">Recently seen</button>
+            </div>
+          </div>
+
+          <div class="le-table-wrap">
+            <table id="le-main-table" class="le-table">
+              <thead>
+                <tr>
+                  <th>Number</th>
+                  <th>Drawn Times</th>
+                  <th>Last Drawn</th>
+                  <th>Track</th>
+                </tr>
+              </thead>
+              <tbody>
+                <?php for ($i = 1; $i <= 70; $i++) {
+                  $number = str_pad((string) $i, 2, '0', STR_PAD_LEFT);
+                  $countNumber = isset($mainCounts[$number]) ? (int) $mainCounts[$number] : 0;
+                  $lastIdx = isset($mainLastSeen[$number]) ? $mainLastSeen[$number] : null;
+                  $lastLabel = 'Not in last ' . (int) $mainWindow . ' drws';
+                  if ($lastIdx !== null) {
+                    if ((int) $lastIdx === 0) {
+                      $lastLabel = 'In last drw';
+                    } else {
+                      $lastLabel = ((int) $lastIdx + 1) . ' drws ago';
+                    }
+                  }
+                  $tags = 'all';
+                  if (in_array($number, $topActiveMain, true)) {
+                    $tags .= ' active';
+                  }
+                  if (in_array($number, $topQuietMain, true)) {
+                    $tags .= ' quiet';
+                  }
+                  if ($lastIdx !== null && (int) $lastIdx <= 4) {
+                    $tags .= ' recent';
+                  }
+                ?>
+                <tr data-tags="<?php echo le_escape($tags); ?>">
+                  <td><span class="le-pill le-pill-main"><?php echo le_escape($number); ?></span></td>
+                  <td><?php echo (int) $countNumber; ?> X</td>
+                  <td><?php echo le_escape($lastLabel); ?></td>
+                  <td><input class="le-checkbox js-track-main" type="checkbox" value="<?php echo le_escape($number); ?>"></td>
+                </tr>
+                <?php } ?>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="le-tracked">
+            <div class="le-tracked-head">
+              <h3 class="le-tracked-title">Tracked main numbers</h3>
+              <button class="le-link-btn" type="button" id="clearMainTracked">Clear all</button>
+            </div>
+            <div class="le-chip-wrap" id="mainTrackedWrap">
+              <div class="le-empty">Select main numbers to keep a small comparison set visible while you review this page.</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="le-card">
+          <div class="le-card-head le-grad-2">Mega Ball table<span class="le-card-sub">Values 01–25 across the last <?php echo (int) $bonusWindow; ?> drawings</span></div>
+
+          <div class="le-table-wrap">
+            <table id="le-bonus-table" class="le-table">
+              <thead>
+                <tr>
+                  <th>Number</th>
+                  <th>Drawn Times</th>
+                  <th>Last Drawn</th>
+                  <th>Track</th>
+                </tr>
+              </thead>
+              <tbody>
+                <?php for ($i = 1; $i <= 25; $i++) {
+                  $number = str_pad((string) $i, 2, '0', STR_PAD_LEFT);
+                  $countNumber = isset($bonusCounts[$number]) ? (int) $bonusCounts[$number] : 0;
+                  $lastIdx = isset($bonusLastSeen[$number]) ? $bonusLastSeen[$number] : null;
+                  $lastLabel = 'Not in last ' . (int) $bonusWindow . ' drws';
+                  if ($lastIdx !== null) {
+                    if ((int) $lastIdx === 0) {
+                      $lastLabel = 'In last drw';
+                    } else {
+                      $lastLabel = ((int) $lastIdx + 1) . ' drws ago';
+                    }
+                  }
+                ?>
+                <tr>
+                  <td><span class="le-pill le-pill-bonus"><?php echo le_escape($number); ?></span></td>
+                  <td><?php echo (int) $countNumber; ?> X</td>
+                  <td><?php echo le_escape($lastLabel); ?></td>
+                  <td><input class="le-checkbox js-track-bonus" type="checkbox" value="<?php echo le_escape($number); ?>"></td>
+                </tr>
+                <?php } ?>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="le-tracked">
+            <div class="le-tracked-head">
+              <h3 class="le-tracked-title">Tracked Mega Ball values</h3>
+              <button class="le-link-btn" type="button" id="clearBonusTracked">Clear all</button>
+            </div>
+            <div class="le-chip-wrap" id="bonusTrackedWrap">
+              <div class="le-empty">Use tracking to keep a smaller Mega Ball working set visible as you compare tables and tools.</div>
+            </div>
+          </div>
+
+          <div class="le-note">
+            <strong>How to read this:</strong> frequency is descriptive, not predictive. It helps show concentration, quiet stretches,
+            and how behavior changes when you adjust the number of drawings analyzed.
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="tools" class="le-section">
+    <div class="le-section-head">
+      <h2 class="le-section-title">Advanced analysis tools</h2>
+      <p class="le-section-sub">
+        The results page establishes context. These tools take that context into deeper modeling and structured exploration.
+      </p>
+    </div>
+    <div class="le-section-body">
+      <div class="le-tool-grid">
+        <article class="le-tool">
+          <div class="le-card-head le-grad-1">SKAI Analysis</div>
+          <div class="le-tool-body">
+            <p class="le-tool-copy">Best next step for a broader multi-signal view using your current game context.</p>
+            <a class="le-tool-cta" href="/picking-winning-numbers/artificial-intelligence/skai-lottery-prediction?gameId=113">Open SKAI Analysis</a>
+          </div>
+        </article>
+
+        <article class="le-tool">
+          <div class="le-card-head le-grad-2">MCMC Analysis</div>
+          <div class="le-tool-body">
+            <p class="le-tool-copy">Use this when you want a probability-oriented view that complements the historical frequency layer.</p>
+            <a class="le-tool-cta" href="/picking-winning-numbers/artificial-intelligence/markov-chain-monte-carlo-mcmc-analysis?gameId=113">Open MCMC Analysis</a>
+          </div>
+        </article>
+
+        <article class="le-tool">
+          <div class="le-card-head le-grad-3">AI Predictions</div>
+          <div class="le-tool-body">
+            <p class="le-tool-copy">Model-driven number sets that can be reviewed alongside the activity and recency signals shown on this page.</p>
+            <a class="le-tool-cta" href="/picking-winning-numbers/artificial-intelligence/ai-powered-predictions?game_id=113">Open AI Predictions</a>
+          </div>
+        </article>
+      </div>
+
+      <div class="le-utility-grid">
+        <a class="le-utility-link" href="/picking-winning-numbers/artificial-intelligence/skip-and-hit-analysis?game_id=113">Skip Analysis</a>
+        <a class="le-utility-link" href="/all-lottery-heatmaps?gameId=113">Heatmap Analysis</a>
+        <a class="le-utility-link" href="/lowest-drawn-number-analysis?gId=113&amp;stateName=<?php echo rawurlencode($stateName); ?>&amp;gName=<?php echo rawurlencode($gName); ?>&amp;sTn=<?php echo rawurlencode($stateAbrev); ?>">Low Number Threshold</a>
+        <a class="le-utility-link" href="/lottery-archives?gId=113&amp;gName=megamillions&amp;sTn=ar">Mega Millions Archives</a>
+      </div>
+    </div>
+  </section>
+
+  <section id="quick-picks" class="le-section">
+    <div class="le-section-head">
+      <h2 class="le-section-title">Generate quick picks</h2>
+      <p class="le-section-sub">
+        Use random, most-drawn, or least-drawn source selection to generate quick-pick sets from the same game context.
+      </p>
+    </div>
+    <div class="le-section-body">
+      <div class="le-card">
+        <div class="le-card-head le-grad-4">Quick-pick generator<span class="le-card-sub">Uses your existing Mega Millions QuickPicks endpoint</span></div>
+        <div class="le-card-body">
+          <div id="qpList" class="le-note" style="margin-top:0; text-align:center;">
+            <span class="le-ball le-ball-main">01</span>
+            <span class="le-ball le-ball-main">02</span>
+            <span class="le-ball le-ball-main">03</span>
+            <span class="le-ball le-ball-main">04</span>
+            <span class="le-ball le-ball-main">05</span>
+            <span class="le-ball le-ball-bonus">06</span>
+          </div>
+
+          <div class="le-quick-controls">
+            <div class="le-radio-group">
+              <label><input type="radio" name="numSource" value="random" checked="checked"> Random</label>
+              <label><input type="radio" name="numSource" value="most"> Most Drawn</label>
+              <label><input type="radio" name="numSource" value="least"> Least Drawn</label>
+            </div>
+
+            <select id="numRows" class="le-select">
+              <option value="">Select number of sets</option>
+              <option value="1">1 Set</option>
+              <option value="2">2 Sets</option>
+              <option value="3">3 Sets</option>
+              <option value="4">4 Sets</option>
+              <option value="5">5 Sets</option>
+              <option value="6">6 Sets</option>
+              <option value="7">7 Sets</option>
+              <option value="8">8 Sets</option>
+              <option value="9">9 Sets</option>
+              <option value="10">10 Sets</option>
+              <option value="11">11 Sets</option>
+              <option value="12">12 Sets</option>
+            </select>
+
+            <button id="MostDrawnQP" type="button" class="le-button">Generate Quick-Pick</button>
+          </div>
+
+          <div class="le-note">
+            This tool helps you experiment with different source strategies using the same Mega Millions quick-pick endpoint already connected to your page.
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="le-section">
+    <div class="le-section-head">
+      <h2 class="le-section-title">Method note</h2>
+      <p class="le-section-sub">
+        This page is designed to improve clarity around historical behavior, not to imply certainty.
+      </p>
+    </div>
+    <div class="le-section-body">
+      <div class="le-note" style="margin-top:0;">
+        <strong>Interpretation guidance:</strong> frequency, recency, and spacing provide historical context. They can help you review how numbers have behaved inside a selected draw window, but they should be treated as descriptive signals rather than guarantees.
+      </div>
+    </div>
+  </section>
+
+</div>
+
+[[script type="text/javascript"]]
+(function () {
+  'use strict';
+
+  function ready(fn) {
+    if (document.readyState !== 'loading') {
+      fn();
+    } else {
+      document.addEventListener('DOMContentLoaded', fn);
+    }
+  }
+
+  function renderTracked(selector, wrapId, chipClass, emptyText) {
+    var wrap = document.getElementById(wrapId);
+    var inputs = document.querySelectorAll(selector);
+    var i;
+    var chip;
+    var empty;
+    var hasItems = false;
+
+    if (!wrap) {
+      return;
+    }
+
+    wrap.innerHTML = '';
+
+    for (i = 0; i < inputs.length; i++) {
+      if (inputs[i].checked) {
+        hasItems = true;
+        chip = document.createElement('span');
+        chip.className = 'le-chip ' + chipClass;
+        chip.appendChild(document.createTextNode(inputs[i].value));
+        wrap.appendChild(chip);
+      }
+    }
+
+    if (!hasItems) {
+      empty = document.createElement('div');
+      empty.className = 'le-empty';
+      empty.appendChild(document.createTextNode(emptyText));
+      wrap.appendChild(empty);
+    }
+  }
+
+  function bindTrackers() {
+    var mainInputs = document.querySelectorAll('.js-track-main');
+    var bonusInputs = document.querySelectorAll('.js-track-bonus');
+    var clearMain = document.getElementById('clearMainTracked');
+    var clearBonus = document.getElementById('clearBonusTracked');
+    var i;
+
+    for (i = 0; i < mainInputs.length; i++) {
+      mainInputs[i].addEventListener('change', function () {
+        renderTracked('.js-track-main', 'mainTrackedWrap', 'le-chip-main', 'Select main numbers to keep a small comparison set visible while you review this page.');
+      });
+    }
+
+    for (i = 0; i < bonusInputs.length; i++) {
+      bonusInputs[i].addEventListener('change', function () {
+        renderTracked('.js-track-bonus', 'bonusTrackedWrap', 'le-chip-bonus', 'Use tracking to keep a smaller Mega Ball working set visible as you compare tables and tools.');
+      });
+    }
+
+    if (clearMain) {
+      clearMain.addEventListener('click', function () {
+        for (i = 0; i < mainInputs.length; i++) {
+          mainInputs[i].checked = false;
+        }
+        renderTracked('.js-track-main', 'mainTrackedWrap', 'le-chip-main', 'Select main numbers to keep a small comparison set visible while you review this page.');
+      });
+    }
+
+    if (clearBonus) {
+      clearBonus.addEventListener('click', function () {
+        for (i = 0; i < bonusInputs.length; i++) {
+          bonusInputs[i].checked = false;
+        }
+        renderTracked('.js-track-bonus', 'bonusTrackedWrap', 'le-chip-bonus', 'Use tracking to keep a smaller Mega Ball working set visible as you compare tables and tools.');
+      });
+    }
+
+    renderTracked('.js-track-main', 'mainTrackedWrap', 'le-chip-main', 'Select main numbers to keep a small comparison set visible while you review this page.');
+    renderTracked('.js-track-bonus', 'bonusTrackedWrap', 'le-chip-bonus', 'Use tracking to keep a smaller Mega Ball working set visible as you compare tables and tools.');
+  }
+
+  function bindFilters() {
+    var group = document.querySelector('[data-filter-group="main"]');
+    var buttons;
+    var rows;
+    var i;
+
+    if (!group) {
+      return;
+    }
+
+    buttons = group.querySelectorAll('.le-filter');
+    rows = document.querySelectorAll('#le-main-table tbody tr');
+
+    function applyFilter(filter) {
+      var tags;
+      for (i = 0; i < rows.length; i++) {
+        tags = rows[i].getAttribute('data-tags') || '';
+        if (filter === 'all' || tags.indexOf(filter) !== -1) {
+          rows[i].style.display = '';
+        } else {
+          rows[i].style.display = 'none';
+        }
+      }
+
+      for (i = 0; i < buttons.length; i++) {
+        buttons[i].className = 'le-filter';
+        if (buttons[i].getAttribute('data-filter') === filter) {
+          buttons[i].className = 'le-filter is-active';
+        }
+      }
+    }
+
+    for (i = 0; i < buttons.length; i++) {
+      buttons[i].addEventListener('click', function () {
+        applyFilter(this.getAttribute('data-filter'));
+      });
+    }
+  }
+
+  function bindTabs() {
+    var tabs = document.querySelectorAll('.le-tab');
+    var i;
+
+    for (i = 0; i < tabs.length; i++) {
+      tabs[i].addEventListener('click', function () {
+        var j;
+        for (j = 0; j < tabs.length; j++) {
+          tabs[j].className = 'le-tab';
+        }
+        this.className = 'le-tab le-tab-active';
+      });
+    }
+  }
+
+  function bindQuickPicks() {
+    var btn = document.getElementById('MostDrawnQP');
+    var list = document.getElementById('qpList');
+
+    if (!btn || !list || typeof jQuery === 'undefined') {
+      return;
+    }
+
+    jQuery(btn).on('click', function () {
+      var numRows = jQuery('#numRows').val();
+      var numFrom = jQuery('input[name="numSource"]:checked').val();
+
+      if (!numRows) {
+        alert('Please select the number of sets first.');
+        return;
+      }
+
+      jQuery(btn).prop('disabled', true);
+      jQuery(btn).append('<span class="le-loader">Loading...</span>');
+
+      jQuery.ajax({
+        type: 'POST',
+        url: '/index.php?option=com_megamil&view=result&task=QuickPicks&numRow=' + encodeURIComponent(numRows) + '&numFrom=' + encodeURIComponent(numFrom) + '&tmpl=raw',
+        cache: false,
+        success: function (innerhtml) {
+          list.innerHTML = innerhtml;
+          jQuery(btn).prop('disabled', false);
+          jQuery(btn).find('.le-loader').remove();
+        },
+        error: function () {
+          jQuery(btn).prop('disabled', false);
+          jQuery(btn).find('.le-loader').remove();
+          alert('Quick-pick generator could not load right now.');
+        }
+      });
+    });
+  }
+
+  ready(function () {
+    bindTrackers();
+    bindFilters();
+    bindTabs();
+    bindQuickPicks();
+  });
+})();
+[[/script]]
+<?php echo Joomla\CMS\HTML\HTMLHelper::_('content.prepare', '{loadposition Pick5Wheels}'); ?>
+{/source}
